@@ -1,0 +1,64 @@
+#!/bin/bash
+
+# Function to display help
+function show_help() {
+    echo "Usage: $0 -f <file>"
+    echo ""
+    echo "Options:"
+    echo "  -f <file>    Specify the file containing the list of alive URLs"
+    echo "  -h           Show this help message and exit"
+}
+
+# Check if arguments are provided
+if [ $# -eq 0 ]; then
+    show_help
+    exit 1
+fi
+
+# Parse command-line options
+while getopts "f:h" opt; do
+    case ${opt} in
+        f )
+            alive_file=$OPTARG
+            ;;
+        h )
+            show_help
+            exit 0
+            ;;
+        \? )
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+# Check if the file is provided
+if [ -z "$alive_file" ]; then
+    echo "Error: You must specify a file with the -f option."
+    show_help
+    exit 1
+fi
+
+# Check if the file exists
+if [ ! -f "$alive_file" ]; then
+    echo "Error: File '$alive_file' not found!"
+    exit 1
+fi
+
+# Run the commands using the specified file
+cat "$alive_file" | gauplus -t 40 | tee -a gaplus-urls.txt
+cat "$alive_file" | waybackurls | tee -a waybackurls.txt
+cat "$alive_file" | hakrawler | tee -a hakrawler-urls.txt
+gospider -S "$alive_file" -c 10 -d 1 --other-source | grep -o 'https\?://[^ ]\+' > gospider-url.txt
+cat "$alive_file" | katana -u alive.txt -d 5 -ps -pss waybackarchive,commoncrawl,alienvault -kf -jc -fx -ef woff,css,png,svg,jpg,woff2,jpeg,gif,svg | urldedupe > katana-urls.txt
+cat "$alive_file" | waymore | tee -a waymore-urls.txt
+cat "$alive_file" | roboxtractor | tee -a roboxtractor-urls.txt
+cat "$alive_file" | github-endpoints | tee -a github-endpoints-urls.txt
+cat "$alive_file" | subjs | tee -a subjs-urls.txt
+cat "$alive_file" | unfurl --input-as-urls | tee -a unfurl-urls.txt
+
+# Without deduplicate URLs
+sort -u gaplus-urls.txt gospider-url.txt hakrawler-urls.txt waybackurls.txt katana-urls.txt waymore-urls.txt roboxtractor-urls.txt github-endpoints-urls.txt subjs-urls.txt unfurl-urls.txt >> urls.txt
+
+# Remove unnecessary files
+rm gaplus-urls.txt waybackurls.txt hakrawler-urls.txt gospider-url.txt katana-urls.txt waymore-urls.txt roboxtractor-urls.txt github-endpoints-urls.txt subjs-urls.txt unfurl-urls.txt
