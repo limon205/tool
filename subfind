@@ -1,0 +1,121 @@
+#!/bin/bash
+
+# Function to check and install missing dependencies
+check_dependencies() {
+    # List of required dependencies
+    dependencies=("subfinder" "assetfinder" "findomain" "amass" "curl" "jq" "openssl" "sed" "grep" "sort" "tee" "httpx")
+
+    for dep in "${dependencies[@]}"; do
+        if ! command -v $dep &> /dev/null; then
+            echo "$dep not found, installing..."
+            # Install missing dependencies
+            case "$dep" in
+                "subfinder")
+                    go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+                    ;;
+                "assetfinder")
+                    go install github.com/tomnomnom/assetfinder@latest
+                    ;;
+                "findomain")
+                    wget https://github.com/Edu4rdSHL/findomain/releases/latest/download/findomain-linux
+                    chmod +x findomain-linux
+                    sudo mv findomain-linux /usr/local/bin/findomain
+                    ;;
+                "amass")
+                    sudo apt-get install -y amass
+                    ;;
+                "httpx")
+                    go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+                    ;;
+                *)
+                    # Generic install command for other tools (assuming a Debian-based system)
+                    sudo apt-get install -y $dep
+                    sudo mv $HOME/go/bin/* /usr/local/bin/
+                    ;;
+            esac
+        fi
+    done
+}
+
+# Function to enumerate domains
+domain_enum() {
+    local domains=$1
+    for domain in $(cat $domains); do
+        echo "Enumerating subdomains for $domain..."
+
+        # Collecting subdomains from various sources
+        subfinder -d $domain -all -o subfinder.txt
+        assetfinder -subs-only $domain | tee assetfinder.txt
+        findomain -t $domain | tee findomain.txt
+        sublist3r -d $domain -o sublist3r.txt
+        
+        curl --insecure --silent "http://web.archive.org/cdx/search/cdx?url=*.$domain/*&output=text&fl=original&collapse=urlkey" | \
+            sed -e 's_https*://__' -e "s/\/.*//" -e 's/:.*//' -e 's/^www\.//' | sed "/@/d" | sed -e 's/\.$//' | sort -u | tee web.archive.txt
+        
+        curl -s "https://dns.bufferover.run/dns?q=.$domain" | jq -r .FDNS_A[] 2>/dev/null | cut -d ',' -f2 | grep -o "\w.*$domain" | sort -u > dnsbuffer.txt
+        curl -s "https://dns.bufferover.run/dns?q=.$domain" | jq -r .RDNS[] 2>/dev/null | cut -d ',' -f2 | grep -o "\w.*$domain" | sort -u >> dnsbuffer.txt
+        curl -s "https://tls.bufferover.run/dns?q=.$domain" | jq -r .Results 2>/dev/null | cut -d ',' -f3 | grep -o "\w.*$domain" | sort -u >> dnsbuffer.txt
+
+        curl -s "https://certspotter.com/api/v0/certs?domain=$domain" | jq -r '.[].dns_names[]' 2>/dev/null | grep -o "\w.*$domain" | sort -u > certspotter.txt
+        curl -s "https://otx.alienvault.com/api/v1/indicators/domain/$domain/passive_dns" | jq '.passive_dns[].hostname' 2>/dev/null | grep -o "\w.*$domain" | sort -u > alienvault.txt
+        curl -s "https://urlscan.io/api/v1/search/?q=domain:$domain" | jq '.results[].page.domain' 2>/dev/null | grep -o "\w.*$domain" | sort -u > urlscan.txt
+        curl -s "https://api.threatminer.org/v2/domain.php?q=$domain&rt=5" | jq -r '.results[]' 2>/dev/null | grep -o "\w.*$domain" | sort -u > threatminer.txt
+        curl -s "https://ctsearch.entrust.com/api/v1/certificates?fields=subjectDN&domain=$domain&includeExpired=false&exactMatch=false&limit=5000" | jq -r '.[].subjectDN' 2>/dev/null | sed 's/cn=//g' | grep -o "\w.*$domain" | sort -u > entrust.txt
+        curl -s "https://rapiddns.io/subdomain/$domain?full=1#result" | grep -oaEi "https?://[^\"\\'> ]+" | grep $domain | cut -d "/" -f3 | sort -u > rapiddns.txt
+        curl -s "https://crt.sh/?q=%25.$domain&output=json" | jq -r '.[].name_value' | sed 's/\*\.//g' | sort -u | tee crtsub.txt
+        curl -s "https://riddler.io/search/exportcsv?q=pld:$domain" | grep -Po "(([\w.-]*)\.([\w]*)\.([A-z]))\w+" | sort -u | tee riddlersub.txt
+        curl -s "https://api.hackertarget.com/hostsearch/?q=$domain" | grep -o "\w.*$domain" > hackertarget.txt
+        curl -s "https://jldc.me/anubis/subdomains/$domain" | grep -Po "((http|https):\/\/)?(([\w.-]*)\.([\w]*)\.([A-z]))\w+" | sort -u | tee jldcsub.txt
+        curl -s "https://www.threatcrowd.org/searchApi/v2/domain/report/?domain=$domain" | jq -r '.subdomains' 2>/dev/null | grep -o "\w.*$domain" > threatsub.txt
+        
+        # Consolidating and deduplicating all found subdomains
+        cat subfinder.txt assetfinder.txt findomain.txt web.archive.txt sublist3r.txt dnsbuffer.txt certspotter.txt alienvault.txt urlscan.txt threatminer.txt entrust.txt rapiddns.txt crtsub.txt riddlersub.txt hackertarget.txt jldcsub.txt threatsub.txt > allsub.txt
+        cat allsub.txt | sort -u | grep $domain | grep -v "?" | grep -v "=" >> sub.txt
+        
+
+        # Cleaning up temporary files
+        rm subfinder.txt assetfinder.txt findomain.txt web.archive.txt sublist3r.txt dnsbuffer.txt certspotter.txt alienvault.txt urlscan.txt threatminer.txt entrust.txt rapiddns.txt crtsub.txt riddlersub.txt hackertarget.txt jldcsub.txt threatsub.txt allsub.txt
+    done
+}
+
+# Function to display help message
+usage() {
+    echo "Usage: $0 [-f <file_with_domains> | -d <single_domain>]"
+    echo "  -f <file_with_domains>  Specify a file with a list of domains to enumerate."
+    echo "  -d <single_domain>      Specify a single domain to enumerate."
+    exit 1
+}
+
+# Check if arguments are provided
+if [ $# -eq 0 ]; then
+    usage
+fi
+
+# Parse command line arguments
+while getopts "f:d:" opt; do
+    case ${opt} in
+        f )
+            domain_file=$OPTARG
+            ;;
+        d )
+            single_domain=$OPTARG
+            ;;
+        * )
+            usage
+            ;;
+    esac
+done
+
+# Check and install dependencies
+check_dependencies
+
+# Run domain enumeration based on provided arguments
+if [ ! -z "$domain_file" ]; then
+    domain_enum $domain_file
+elif [ ! -z "$single_domain" ]; then
+    echo $single_domain > temp_domain.txt
+    domain_enum temp_domain.txt
+    rm temp_domain.txt
+else
+    usage
+fi
